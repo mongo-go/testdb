@@ -1,0 +1,10 @@
+language: go
+env:
+  TEST_MONGO_URL=127.0.0.1
+services:
+  - mongodb
+before_install:
+  - go get github.com/mattn/goveralls
+  - go get golang.org/x/tools/cover
+script:
+  - $HOME/gopath/bin/goveralls -service=travis-ci
