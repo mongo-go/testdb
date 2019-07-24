@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/globalsign/mgo"
 	"github.com/mongo-go/testdb"
-	"gopkg.in/mgo.v2"
 )
 
 var defaultUrl = "localhost"

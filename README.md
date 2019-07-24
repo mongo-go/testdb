@@ -25,7 +25,7 @@ import (
         "testing"
 
         "github.com/mongo-go/testdb"
-	"gopkg.in/mgo.v2"
+        "github.com/globalsign/mgo"
 )
 
 var testDb *testdb.TestDB
