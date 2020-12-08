@@ -2,26 +2,32 @@
 package testdb_test
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/globalsign/mgo"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
 	"github.com/mongo-go/testdb"
 )
 
-var defaultUrl = "localhost"
-var defaultDb = "test"
-var defaultTimeout = time.Duration(2) * time.Second
+var (
+	defaultUrl     = "mongodb://localhost"
+	defaultDb      = "mongo-go"
+	defaultTimeout = time.Duration(2) * time.Second
+)
 
 // A quick smoke test to make sure the basics work.
 func TestTestDB(t *testing.T) {
 	testDb := testdb.NewTestDB(defaultUrl, defaultDb, defaultTimeout)
 
 	// CreateRandomCollection errors if called before Connect.
-	_, err := testDb.CreateRandomCollection(&mgo.CollectionInfo{}, []mgo.Index{})
+	coll, err := testDb.CreateRandomCollection(testdb.NoIndexes)
 	if err == nil {
-		t.Error("expected an error, did not get one")
+		t.Fatal("expected an error, did not get one")
 	}
 
 	// Connect to the db.
@@ -33,88 +39,56 @@ func TestTestDB(t *testing.T) {
 	// Calling OverrideWithEnvVars after Connect does nothing.
 	testDb.OverrideWithEnvVars()
 
-	indexes := []mgo.Index{
+	indexes := []mongo.IndexModel{
 		{
-			Key:    []string{"iamunique"},
-			Unique: true,
+			Keys:    bson.D{{"iamunique", 1}},
+			Options: options.Index().SetUnique(true),
 		},
 	}
 
 	// Create a collection with a unique index.
-	c, err := testDb.CreateRandomCollection(&mgo.CollectionInfo{}, indexes)
+	coll, err = testDb.CreateRandomCollection(indexes)
 	if err != nil {
 		t.Error(err)
 	}
-
-	defer func() {
-		err := testDb.DropCollection(c)
-		if err != nil {
-			t.Error(err)
-		}
-	}()
+	defer coll.Drop(context.Background())
 
 	doc := map[string]string{
 		"iamunique": "a",
 	}
 
-	err = c.Insert(doc)
+	_, err = coll.InsertOne(context.Background(), doc)
 	if err != nil {
 		t.Error(err)
 	}
 
 	// Should get a duplicate key error when we try to insert the same doc.
-	err = c.Insert(doc)
-	if !mgo.IsDup(err) {
+	_, err = coll.InsertOne(context.Background(), doc)
+	if !testdb.IsDupeKeyError(err) {
 		t.Errorf("expected a duplicate key error, did not get one (err: %s)", err)
 	}
 }
 
 func TestCreateCollectionInvalidIndex(t *testing.T) {
 	testDb := testdb.NewTestDB(defaultUrl, defaultDb, defaultTimeout)
-
 	if err := testDb.Connect(); err != nil {
 		t.Fatal(err)
 	}
 	defer testDb.Close()
 
 	// An invalid index.
-	indexes := []mgo.Index{
+	indexes := []mongo.IndexModel{
 		{
-			Key:    []string{"", "", ""},
-			Unique: true,
+			Keys: bson.D{{"", 1}},
 		},
 	}
 
-	_, err := testDb.CreateRandomCollection(&mgo.CollectionInfo{}, indexes)
+	coll, err := testDb.CreateRandomCollection(indexes)
 	if err == nil {
 		t.Error("expected an error, did not get one")
 	}
-}
-
-func TestDropCollectionError(t *testing.T) {
-	testDb := testdb.NewTestDB(defaultUrl, defaultDb, defaultTimeout)
-
-	if err := testDb.Connect(); err != nil {
-		t.Fatal(err)
-	}
-	defer testDb.Close()
-
-	// Create a collection.
-	c, err := testDb.CreateRandomCollection(&mgo.CollectionInfo{}, []mgo.Index{})
-	if err != nil {
-		t.Error(err)
-	}
-
-	// Drop the collection on our own without using TestDB.
-	err = c.DropCollection()
-	if err != nil {
-		t.Error(err)
-	}
-
-	//	 Dropping the collection through TestDB should throw an error.
-	err = testDb.DropCollection(c)
-	if err == nil {
-		t.Error("expected an error, did not get one")
+	if coll != nil {
+		coll.Drop(context.Background())
 	}
 }
 

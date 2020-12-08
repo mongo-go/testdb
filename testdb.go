@@ -3,13 +3,14 @@
 package testdb
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
-	"net"
 	"os"
 	"time"
 
-	"github.com/globalsign/mgo"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const (
@@ -24,6 +25,10 @@ const (
 	ENV_VAR_TEST_MONGO_DB = "TEST_MONGO_DB"
 )
 
+// NoIndexes can be passed to CreateRandomCollection to create a collection
+// without indexes.
+var NoIndexes []mongo.IndexModel
+
 func init() { rand.Seed(time.Now().UnixNano()) }
 
 // A TestDB represents a MongoDB database used for running tests against.
@@ -32,7 +37,7 @@ type TestDB struct {
 	db      string
 	timeout time.Duration
 	// --
-	session *mgo.Session
+	client *mongo.Client
 }
 
 // NewTestDB creates a new TestDB with the provided url, database name, and
@@ -54,7 +59,7 @@ func NewTestDB(url, db string, timeout time.Duration) *TestDB {
 // This method will only do anything if Connect hasn't already been called on
 // the TestDB.
 func (t *TestDB) OverrideWithEnvVars() {
-	if t.session != nil {
+	if t.client != nil {
 		return
 	}
 
@@ -69,26 +74,43 @@ func (t *TestDB) OverrideWithEnvVars() {
 // Connect initializes a connection to the TestDB. It will return an error if
 // it cannot connect to MongoDB.
 func (t *TestDB) Connect() error {
-	dialInfo, err := mgo.ParseURL(t.url)
+	// SetServerSelectionTimeout is different and more important than SetConnectTimeout.
+	// Internally, the mongo driver is polling and updating the topology,
+	// i.e. the list of replicas/nodes in the cluster. SetServerSelectionTimeout
+	// applies to selecting a node from the topology, which should be nearly
+	// instantaneous when the cluster is ok _and_ when it's down. When a node
+	// is down, it's reflected in the topology, so there's no need to wait for
+	// another server because we only use one server: the master replica.
+	// The 500ms below is really how long the driver will wait for the master
+	// replica to come back online.
+	//
+	// SetConnectTimeout is what is seems: timeout when a connection is actually
+	// made. This guards against slows networks, or the case when the mongo driver
+	// thinks the master is online but really it's not.
+	opts := options.Client().
+		ApplyURI(t.url).
+		SetConnectTimeout(t.timeout).
+		SetServerSelectionTimeout(time.Duration(500 * time.Millisecond))
+
+	client, err := mongo.NewClient(opts)
 	if err != nil {
-		return fmt.Errorf("error connecting to mongo on '%s': %s", t.url, err)
+		return err
 	}
 
-	dialInfo.DialServer = func(addr *mgo.ServerAddr) (net.Conn, error) {
-		conn, err := net.DialTimeout("tcp", addr.String(), t.timeout)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
+	// mongo.Connect() does not actually connect:
+	//   The Client.Connect method starts background goroutines to monitor the
+	//   state of the deployment and does not do any I/O in the main goroutine to
+	//   prevent the main goroutine from blocking. Therefore, it will not error if
+	//   the deployment is down.
+	// https://pkg.go.dev/go.mongodb.org/mongo-driver/mongo?tab=doc#Connect
+	// The caller must call client.Ping() to actually connect. Consequently,
+	// we don't need a context here. As long as there's not a bug in the mongo
+	// driver, this won't block.
+	if err := client.Connect(context.Background()); err != nil {
+		return err
 	}
-	dialInfo.Timeout = t.timeout
 
-	s, err := mgo.DialWithInfo(dialInfo)
-	if err != nil {
-		return fmt.Errorf("error connecting to mongo on '%s': %s", t.url, err)
-	}
-
-	t.session = s
+	t.client = client
 	return nil
 }
 
@@ -101,48 +123,62 @@ func (t *TestDB) Connect() error {
 // TestDB only supports creating random collections due to the fact that tests
 // run concurrently. If multiple tests used the same collection, they would
 // probably stomp on each other.
-func (t *TestDB) CreateRandomCollection(info *mgo.CollectionInfo, indexes []mgo.Index) (*mgo.Collection, error) {
-	if t.session == nil {
+func (t *TestDB) CreateRandomCollection(indexes []mongo.IndexModel) (*mongo.Collection, error) {
+	if t.client == nil {
 		return nil, fmt.Errorf("must call Connect first")
 	}
 
-	s := t.session.Copy()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	collection := "test_" + randSeq(8)
-	c := s.DB(t.db).C(collection)
+	coll := t.client.Database(t.db).Collection(collection)
 
-	err := c.Create(info)
-	if err != nil {
-		return c, fmt.Errorf("error creating collection: %s", err)
+	indexView := coll.Indexes()
+
+	opts := options.CreateIndexes().SetMaxTime(2 * time.Second)
+	if _, err := indexView.CreateMany(ctx, indexes, opts); err != nil {
+		coll.Drop(ctx)
+		return nil, err
 	}
 
-	for _, index := range indexes {
-		err = c.EnsureIndex(index)
-		if err != nil {
-			return c, fmt.Errorf("error creating index '%#v': %s", index.Key, err)
-		}
-	}
-
-	return c, nil
-}
-
-// DropCollection removes a collection and all of its documents from the
-// TestDB. It also closes the MongoDB connection behind the collection. This
-// method should always be called to clean up a collection created by the
-// CreateRandomCollection method.
-func (t *TestDB) DropCollection(c *mgo.Collection) error {
-	err := c.DropCollection()
-	if err != nil {
-		return fmt.Errorf("error dropping the collection '%s': %s", c.FullName, err)
-	}
-
-	c.Database.Session.Close()
-	return nil
+	return coll, nil
 }
 
 // Close terminates the TestDB's connection to MongoDB.
 func (t *TestDB) Close() {
-	t.session.Close()
+	t.client.Disconnect(context.Background())
+}
+
+const dupeKeyCode = 11000
+
+// IsDupeKeyError returns true if the error is a Mongo duplicate key error.
+func IsDupeKeyError(err error) bool {
+	// mongo.WriteException{
+	//   WriteConcernError:(*mongo.WriteConcernError)(nil),
+	//   WriteErrors:mongo.WriteErrors{
+	//     mongo.WriteError{
+	//       Index:0,
+	//       Code:11000,
+	//       Message:"E11000 duplicate key error collection: coll.nodes index: x_1 dup key: { : 6 }"
+	//     }
+	//   }
+	// }
+	if _, ok := err.(mongo.WriteException); ok {
+		we := err.(mongo.WriteException)
+		for _, e := range we.WriteErrors {
+			if e.Code == dupeKeyCode {
+				return true
+			}
+		}
+	}
+	if _, ok := err.(mongo.CommandError); ok {
+		ce := err.(mongo.CommandError)
+		if ce.Code == dupeKeyCode {
+			return true
+		}
+	}
+	return false
 }
 
 // ------------------------------------------------------------------------- //

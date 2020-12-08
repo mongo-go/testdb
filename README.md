@@ -3,7 +3,7 @@
 [![Build Status](https://travis-ci.org/mongo-go/testdb.svg?branch=master)](https://travis-ci.org/mongo-go/testdb)
 [![Go Report Card](https://goreportcard.com/badge/github.com/mongo-go/testdb)](https://goreportcard.com/report/github.com/mongo-go/testdb)
 [![Coverage Status](https://coveralls.io/repos/github/mongo-go/testdb/badge.svg?branch=master&)](https://coveralls.io/github/mongo-go/testdb?branch=master)
-[![GoDoc](https://godoc.org/github.com/mongo-go/testdb?status.svg)](https://godoc.org/github.com/mongo-go/testdb)
+[![GoDoc](https://godoc.org/github.com/mongo-go/testdb?status.svg)](https://pkg.go.dev/github.com/mongo-go/testdb)
 
 This is a small Go package that makes it easy to create databases/collections for MongoDB tests.
 It's useful when you want to run tests against an actual MongoDB instance.
@@ -25,14 +25,13 @@ import (
         "testing"
 
         "github.com/mongo-go/testdb"
-        "github.com/globalsign/mgo"
 )
 
 var testDb *testdb.TestDB
 
 func setup(t *testing.T) *mgo.Collection {
 	if testDb == nil {
-		testDb = testdb.NewTestDB("your_url", "your_db", time.Duration(2) * time.Second)
+		testDb = testdb.NewTestDB("mongodb://localhost", "your_db", time.Duration(2) * time.Second)
 
 		err := testDb.Connect()
 		if err != nil {
@@ -40,37 +39,19 @@ func setup(t *testing.T) *mgo.Collection {
 		}
         }
 
-        c, err := testDb.CreateRandomCollection(*mgo.CollectionInfo{}, []mgo.Index{})
+        coll, err := testDb.CreateRandomCollection(testdb.NoIndexes)
         if err != nil {
                 t.Fatal(err)
         }
 
-        return c
-}
-
-func teardown(t *testing.T, c *mgo.Collection) {
-	if testDb == nil {
-		t.Fatal("must call setup before teardown")
-	}
-
-	err := testDb.DropCollection(c)
-	if err != nil {
-		t.Error(err)
-	}
+        return coll // random *mongo.Collection in "your_db"
 }
 
 func Test1(t *testing.T) {
-        c := setup(t)
-        defer teardown(t, c)
+        coll := setup(t)
+	defer coll.Drop(context.Background())
 
-        // Test queries against c.
-}
-
-func Test2(t *testing.T) {
-        c := setup(t)
-        defer teardown(t, c)
-
-        // Test queries against c.
+        // Test queries using coll
 }
 ```
 
@@ -85,7 +66,7 @@ By default, even if these env vars are set, they will not be used. To use them, 
 // export TEST_MONGO_URL="their_url"
 // export TEST_MONGO_DB="their_db"
 
-testDb := testdb.NewTestDB("your_url", "your_db", time.Duration(2) * time.Second)
+testDb := testdb.NewTestDB("mongodb://localhost", "your_db", time.Duration(2) * time.Second)
 testDb.OverrideWithEnvVars()
 
 err := testdb.Conect() {
@@ -93,7 +74,7 @@ err := testdb.Conect() {
 }
 ```
 
-Why is this useful? Say you have some tests that connect to MongoDB, which you always have running locally at "your_url".
+Why is this useful? Say you have some tests that connect to MongoDB, which you always have running locally at "mongodb://localhost".
 Hardcoding your tests to create a TestDB with that url works fine for you, but what about when someone else who has MongoDB running locally at "their_url" tries to run your tests?
 By calling OverrideWithEnvVars in your tests you give whoever is invoking them the ability to change the url and database of the TestDB without having to change any code.
 
