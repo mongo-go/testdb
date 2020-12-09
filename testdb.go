@@ -134,12 +134,14 @@ func (t *TestDB) CreateRandomCollection(indexes []mongo.IndexModel) (*mongo.Coll
 	collection := "test_" + randSeq(8)
 	coll := t.client.Database(t.db).Collection(collection)
 
-	indexView := coll.Indexes()
+	if len(indexes) > 0 {
+		indexView := coll.Indexes()
 
-	opts := options.CreateIndexes().SetMaxTime(2 * time.Second)
-	if _, err := indexView.CreateMany(ctx, indexes, opts); err != nil {
-		coll.Drop(ctx)
-		return nil, err
+		opts := options.CreateIndexes().SetMaxTime(2 * time.Second)
+		if _, err := indexView.CreateMany(ctx, indexes, opts); err != nil {
+			coll.Drop(ctx)
+			return nil, err
+		}
 	}
 
 	return coll, nil
